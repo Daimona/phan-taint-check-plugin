@@ -5,7 +5,7 @@ This is a plugin to [Phan] to try and detect security issues
 (such as [XSS]). It keeps track of any time a user can modify
 a variable, and checks to see that such variables are
 escaped before being output as html or used as an sql query, etc.
-
+ 
 It is primarily intended for scanning MediaWiki extensions,
 however it supports a generic mode which should work with
 any PHP project.
