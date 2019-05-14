@@ -170,8 +170,6 @@ There's much more than listed here, but some notable limitations/bugs:
   ```
   This will give both a double escaped warning and an XSS warning, as the
   plugin only tracks $stuff, not $stuff[0] vs $stuff[1].
-* `@suppress` is only recognized in function/method doc comments. This means
-  that it is difficult to suppress errors for code written in a global scope.
 
 ## MediaWiki specific limitations
 * With pass by reference parameters to MediaWiki hooks,
