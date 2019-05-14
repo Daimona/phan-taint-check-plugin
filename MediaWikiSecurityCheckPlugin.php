@@ -37,7 +37,7 @@ use ast\Node;
 class MediaWikiSecurityCheckPlugin extends SecurityCheckPlugin {
 
 	/**
-	 * @var Array A mapping from hook names to FQSEN that implement it
+	 * @var array A mapping from hook names to FQSEN that implement it
 	 */
 	protected $hookSubscribers = [];
 
@@ -295,6 +295,27 @@ class MediaWikiSecurityCheckPlugin extends SecurityCheckPlugin {
 				self::YES_TAINT & ~self::SQL_TAINT,
 				'overall' => self::NO_TAINT
 			],
+			'\Wikimedia\Rdbms\Database::buildLike' => [
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				self::YES_TAINT & ~self::SQL_TAINT,
+				'overall' => self::NO_TAINT
+			],
 			// makeList is special cased in MWVistor::checkMakeList
 			// so simply disable auto-taint detection here.
 			'\Wikimedia\Rdbms\IDatabase::makeList' => [
@@ -452,7 +473,6 @@ class MediaWikiSecurityCheckPlugin extends SecurityCheckPlugin {
 				self::ESCAPES_HTML,
 				'overall' => self::ESCAPED_TAINT
 			],
-			'\WebRequest::getGPCVal' => [ 'overall' => self::YES_TAINT, ],
 			'\WebRequest::getGPCVal' => [ 'overall' => self::YES_TAINT, ],
 			'\WebRequest::getRawVal' => [ 'overall' => self::YES_TAINT, ],
 			'\WebRequest::getVal' => [ 'overall' => self::YES_TAINT, ],
@@ -630,7 +650,7 @@ class MediaWikiSecurityCheckPlugin extends SecurityCheckPlugin {
 	 * @note This assumes that any given func will only implement
 	 *   one hook
 	 * @param FullyQualifiedFunctionLikeName $fqsen The function to check
-	 * @return string The hook it is implementing
+	 * @return string|null The hook it is implementing or null if no hook
 	 */
 	public function isSpecialHookSubscriber( FullyQualifiedFunctionLikeName $fqsen ) {
 		$this->loadExtensionJson();
@@ -650,6 +670,7 @@ class MediaWikiSecurityCheckPlugin extends SecurityCheckPlugin {
 				}
 			}
 		}
+		return null;
 	}
 
 	/**
@@ -670,9 +691,20 @@ class MediaWikiSecurityCheckPlugin extends SecurityCheckPlugin {
 		CodeBase $code_base
 	) : bool {
 		if (
-			( $lhsTaint & $rhsTaint ) === self::HTML_TAINT &&
-			$context->isInClassScope()
+			( $lhsTaint & $rhsTaint ) === self::HTML_TAINT
 		) {
+			if (
+				strpos( $context->getFile(), "maintenance/" ) === 0 ||
+				strpos( $context->getFile(), "./maintenance/" ) === 0
+			) {
+				// For classes not using Maintenance subclasses
+				$msg = ' [Likely false positive because in maintenance'
+					. ' subdirectory, thus probably CLI]';
+				return true;
+			}
+			if ( !$context->isInClassScope() ) {
+				return false;
+			}
 			$class = $context->getClassInScope( $code_base );
 			$maintFQSEN = FullyQualifiedClassName::fromFullyQualifiedString(
 				'\\Maintenance'

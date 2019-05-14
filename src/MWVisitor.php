@@ -98,11 +98,36 @@ class MWVisitor extends TaintednessBaseVisitor {
 				case '\Hooks::runWithoutAbort':
 					$this->triggerHook( $node );
 					break;
+				case '\Linker::makeExternalLink':
+					$this->checkExternalLink( $node );
+					break;
 				default:
 					$this->doSelectWrapperSpecialHandling( $node, $method );
 			}
 		} catch ( Exception $e ) {
 			// ignore
+		}
+	}
+
+	/**
+	 * Linker::makeExternalLink escaping depends on third argument
+	 *
+	 * @param Node $node
+	 */
+	private function checkExternalLink( Node $node ) {
+		$escapeArg = $node->children['args']->children[2] ?? true;
+		if ( is_object( $escapeArg ) && $escapeArg->kind === \ast\AST_CONST ) {
+			$escapeArg = $escapeArg->children['name']->children['name'] !== 'false';
+		}
+		$text = $node->children['args']->children[1] ?? null;
+		if ( !$escapeArg && $text instanceof Node ) {
+			$this->maybeEmitIssue(
+				SecurityCheckPlugin::HTML_EXEC_TAINT,
+				$this->getTaintedness( $text ),
+				"Calling Linker::makeExternalLink with user controlled text " .
+				"and third argument set to false"
+					. $this->getOriginalTaintLine( $text )
+			);
 		}
 	}
 
@@ -417,8 +442,9 @@ class MWVisitor extends TaintednessBaseVisitor {
 	 *
 	 * Special cased because the second arg totally changes
 	 * how this function is interpreted.
+	 * @param Node $node
 	 */
-	private function checkMakeList( $node ) {
+	private function checkMakeList( Node $node ) {
 		$args = $node->children['args'];
 		// First determine which IDatabase::LIST_*
 		// 0 = IDatabase::LIST_COMMA is default value.
@@ -635,6 +661,7 @@ class MWVisitor extends TaintednessBaseVisitor {
 	 * Check to see if isHTML => true and is tainted.
 	 *
 	 * @param Node $node The expr child of the return. NOT the return itself
+	 * @param FQSEN $funcName
 	 * @suppress PhanTypeMismatchForeach
 	 */
 	private function visitReturnOfFunctionHook( Node $node, FQSEN $funcName ) {

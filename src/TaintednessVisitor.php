@@ -59,7 +59,7 @@ class TaintednessVisitor extends TaintednessBaseVisitor {
 	}
 
 	/**
-	 * @param Node $node
+	 * @param Decl $node
 	 * @return int Taint
 	 */
 	public function visitFuncDecl( Decl $node ) : int {
@@ -156,7 +156,7 @@ class TaintednessVisitor extends TaintednessBaseVisitor {
 	}
 
 	/**
-	 * @param Node $node
+	 * @param Decl $node
 	 * @return int Taint
 	 */
 	public function visitClass( Decl $node ) : int {
@@ -377,9 +377,15 @@ class TaintednessVisitor extends TaintednessBaseVisitor {
 
 		// If we're assigning to a variable we know will be output later
 		// raise an issue now.
+		// We only want to give a warning if we are adding new taint to the
+		// variable. If the variable is alredy tainted, no need to retaint.
+		// Otherwise, this could result in a variable basically tainting itself.
+		// TODO: Additionally, we maybe consider skipping this when in
+		// branch scope and variable is not pass by reference.
+		$adjustedRHS = $rhsTaintedness & ( $rhsTaintedness ^ $lhsTaintedness );
 		$this->maybeEmitIssue(
 			$lhsTaintedness,
-			$rhsTaintedness,
+			$adjustedRHS,
 			"Assigning a tainted value to a variable that later does something unsafe with it"
 				. $this->getOriginalTaintLine( $node->children['var'] )
 		);
@@ -399,7 +405,20 @@ class TaintednessVisitor extends TaintednessBaseVisitor {
 				continue;
 			}
 			foreach ( $rhsObjs as $rhsObj ) {
-				$this->mergeTaintDependencies( $variableObj, $rhsObj );
+				// Only merge dependencies if there are no other
+				// sources of taint. Otherwise we can potentially
+				// misattribute where the taint is coming from
+				// See testcase dblescapefieldset.
+				$taintRHSObj = $this->getTaintedness( $rhsObj );
+				if (
+					( ( ( $lhsTaintedness | $rhsTaintedness )
+					& ~$taintRHSObj ) & SecurityCheckPlugin::ALL_YES_EXEC_TAINT )
+					=== 0
+				) {
+					$this->mergeTaintDependencies( $variableObj, $rhsObj );
+				} elseif ( $taintRHSObj ) {
+					$this->mergeTaintError( $variableObj, $rhsObj );
+				}
 			}
 		}
 		return $rhsTaintedness;
@@ -589,8 +608,8 @@ class TaintednessVisitor extends TaintednessBaseVisitor {
 		if ( $node->children['class']->kind === \ast\AST_NAME ) {
 			return $this->visitMethodCall( $node );
 		} else {
-			return SecurityCheckPlugin::UNKNOWN_TAINT;
 			$this->debug( __METHOD__, "cannot understand new" );
+			return SecurityCheckPlugin::UNKNOWN_TAINT;
 		}
 	}
 

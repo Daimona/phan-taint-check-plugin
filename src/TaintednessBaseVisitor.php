@@ -792,7 +792,6 @@ abstract class TaintednessBaseVisitor extends AnalysisVisitor {
 	 * @return int The taint
 	 */
 	protected function getTaintednessPhanObj( TypedElementInterface $variableObj ) : int {
-		$taintedness = SecurityCheckPlugin::UNKNOWN_TAINT;
 		if ( $variableObj instanceof FunctionInterface ) {
 			throw new Exception( "This method cannot be used with methods" );
 		}
@@ -1079,7 +1078,12 @@ return [];
 	 *
 	 * Given 2 variables (e.g. $lhs = $rhs ), see to it that any function/method
 	 * which we marked as being able to set the value of rhs, is also marked
-	 * as being able to set the value of lhs.
+	 * as being able to set the value of lhs. We use this information to figure
+	 * out what method parameter is causing the return statement to be tainted.
+	 *
+	 * @warning Be careful calling this function if lhs already has taint
+	 *  or rhs side is a compound statement. This could result in misattribution
+	 *  of where the taint is coming from.
 	 *
 	 * This also merges the information on what line caused the taint.
 	 *
@@ -1091,7 +1095,6 @@ return [];
 		TypedElementInterface $rhs
 	) {
 		// $this->debug( __METHOD__, "merging $lhs <- $rhs" );
-		$taintLHS = $this->getTaintedness( $lhs );
 		$taintRHS = $this->getTaintedness( $rhs );
 
 		if ( $taintRHS &
@@ -1144,13 +1147,13 @@ return [];
 		int $taint = SecurityCheckPlugin::EXEC_TAINT
 	) {
 		// Ensure we only set exec bits, not normal taint bits.
-		$taint = $taint & SecurityCheckPlugin::EXEC_TAINT;
-		// FIXME. Does this check make sense?
-		// should it also check if it has any of the YES_TAINT flags?
+		$taint = $taint & SecurityCheckPlugin::BACKPROP_TAINTS;
 
-		// echo __METHOD__ . $this->dbgInfo() . "Setting all methods dependent on $var as exec\n";
-		if ( !property_exists( $var, 'taintedMethodLinks' ) ) {
-			// $this->debug( __METHOD__, "no backlinks on $var" );
+		if (
+			$taint === 0 ||
+			$this->isIssueSuppressedOrFalsePositive( $taint ) ||
+			!property_exists( $var, 'taintedMethodLinks' )
+		) {
 			return;
 		}
 
@@ -1390,7 +1393,7 @@ return [];
 	 * @param Mixed $node Either a Node or a string, int, etc. The expression
 	 * @param int $taintedness The taintedness in question
 	 * @param FunctionInterface $curFunc The function/method we are in.
-	 * @return Array numeric keys for each parameter taint and 'overall' key
+	 * @return array numeric keys for each parameter taint and 'overall' key
 	 * @suppress PhanTypeMismatchForeach
 	 */
 	protected function matchTaintToParam(
@@ -1674,42 +1677,17 @@ return [];
 	}
 
 	/**
-	 * Emit an issue using the appropriate issue type
+	 * Get the issue name and severity given a taint
 	 *
-	 * If $this->overrideContext is set, it will use that for the
-	 * file/line number to report. This is meant as a hack, so that
-	 * in MW we can force hook related issues to be in the extension
-	 * instead of where the hook is called from in MW core.
-	 *
-	 * @param int $lhsTaint Taint of left hand side (or equivalent)
-	 * @param int $rhsTaint Taint of right hand side (or equivalent)
-	 * @param string $msg Issue description
+	 * @param int $combinedTaint The taint to warn for. I.e. The exec flags
+	 *   from LHS shifted to non-exec bitwise AND'd with the rhs taint.
+	 * @return array Issue type and severity
 	 */
-	public function maybeEmitIssue( int $lhsTaint, int $rhsTaint, string $msg ) {
-		if ( $this->isSafeAssignment( $lhsTaint, $rhsTaint ) ) {
-			return;
-		}
-
-		$adjustLHS = $this->execToYesTaint( $lhsTaint );
-		$combinedTaint = $rhsTaint & $adjustLHS;
+	public function taintToIssueAndSeverity( int $combinedTaint ) {
 		$issueType = 'SecurityCheckMulti';
 		$severity = Issue::SEVERITY_NORMAL;
-		if (
-			( $combinedTaint === 0 &&
-			$rhsTaint & SecurityCheckPlugin::UNKNOWN_TAINT ) ||
-			$this->plugin->isFalsePositive(
-				$adjustLHS,
-				$rhsTaint,
-				$msg,
-				// FIXME should this be $this->overrideContext ?
-				$this->context,
-				$this->code_base
-			)
-		) {
-			$issueType = 'SecurityCheck-LikelyFalsePositive';
-			$severity = Issue::SEVERITY_LOW;
 
-		} elseif (
+		if (
 			$combinedTaint === SecurityCheckPlugin::HTML_TAINT
 		) {
 			$issueType = 'SecurityCheck-XSS';
@@ -1755,7 +1733,6 @@ return [];
 		} else {
 			// Multiple taints?
 			// Include the taint constants for debugging purposes.
-			$msg .= " ($lhsTaint <- $rhsTaint)";
 			if (
 				$combinedTaint & (
 					SecurityCheckPlugin::SHELL_TAINT |
@@ -1765,6 +1742,52 @@ return [];
 				$severity = Issue::SEVERITY_CRITICAL;
 			}
 		}
+		return [ $issueType, $severity ];
+	}
+
+	/**
+	 * Emit an issue using the appropriate issue type
+	 *
+	 * If $this->overrideContext is set, it will use that for the
+	 * file/line number to report. This is meant as a hack, so that
+	 * in MW we can force hook related issues to be in the extension
+	 * instead of where the hook is called from in MW core.
+	 *
+	 * @param int $lhsTaint Taint of left hand side (or equivalent)
+	 * @param int $rhsTaint Taint of right hand side (or equivalent)
+	 * @param string $msg Issue description
+	 */
+	public function maybeEmitIssue( int $lhsTaint, int $rhsTaint, string $msg ) {
+		if ( $this->isSafeAssignment( $lhsTaint, $rhsTaint ) ) {
+			return;
+		}
+
+		$adjustLHS = $this->execToYesTaint( $lhsTaint );
+		$combinedTaint = $rhsTaint & $adjustLHS;
+		if (
+			( $combinedTaint === 0 &&
+			$rhsTaint & SecurityCheckPlugin::UNKNOWN_TAINT ) ||
+			$this->plugin->isFalsePositive(
+				$adjustLHS,
+				$rhsTaint,
+				$msg,
+				// FIXME should this be $this->overrideContext ?
+				$this->context,
+				$this->code_base
+			)
+		) {
+			$issueType = 'SecurityCheck-LikelyFalsePositive';
+			$severity = Issue::SEVERITY_LOW;
+		} else {
+			list( $issueType, $severity ) = $this->taintToIssueAndSeverity(
+				$combinedTaint
+			);
+		}
+
+		// If we have multiple, include what types.
+		if ( $issueType === 'SecurityCheckMulti' ) {
+			$msg .= " ($lhsTaint <- $rhsTaint)";
+		}
 
 		$context = $this->context;
 		if ( $this->overrideContext ) {
@@ -1773,12 +1796,44 @@ return [];
 			$msg .= " (Originally at: $this->context)";
 			$context = $this->overrideContext;
 		}
+
 		$this->plugin->emitIssue(
 			$this->code_base,
 			$context,
 			$issueType,
 			$msg,
 			$severity
+		);
+	}
+
+	/**
+	 * Method to determine if a potential error isn't really real
+	 *
+	 * This is useful when a specific warning would have a side effect
+	 * and we want to know whether we should suppress the side effect in
+	 * addition to the warning.
+	 *
+	 * @param int $lhsTaint Must have at least one EXEC flag set
+	 * @return bool
+	 */
+	public function isIssueSuppressedOrFalsePositive( $lhsTaint ) {
+		assert( ( $lhsTaint & SecurityCheckPlugin::ALL_EXEC_TAINT ) !== 0 );
+		$context = $this->overrideContext ?: $this->context;
+		$adjustLHS = $this->execToYesTaint( $lhsTaint );
+		list( $issueType ) = $this->taintToIssueAndSeverity( $adjustLHS );
+
+		if ( $context->hasSuppressIssue( $this->code_base, $issueType ) ) {
+			return true;
+		}
+
+		$msg = "[dummy msg for false positive check]";
+		return $this->plugin->isFalsePositive(
+			$adjustLHS,
+			$adjustLHS,
+			$msg,
+			// not using $this->overrideContext to be consistent with maybeEmitIssue()
+			$this->context,
+			$this->code_base
 		);
 	}
 
@@ -1796,7 +1851,7 @@ return [];
 	 * @param null|FunctionInterface $func null if no function
 	 * @param FQSEN|string $funcName FQSEN for method/function or string description
 	 * @param array $taint Taint of function/method
-	 * @param Array $args Arguments to function/method
+	 * @param array $args Arguments to function/method
 	 * @return int Taint The resulting taint of the expression
 	 */
 	public function handleMethodCall( $func, $funcName, array $taint, array $args ) : int {

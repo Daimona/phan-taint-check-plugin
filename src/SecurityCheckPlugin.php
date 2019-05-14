@@ -96,6 +96,10 @@ abstract class SecurityCheckPlugin extends PluginImplementation {
 	// ALL taint is YES + special purpose taints, but not including special flags.
 	const ALL_TAINT = self::YES_TAINT | self::SQL_NUMKEY_TAINT | self::ESCAPED_TAINT;
 	const ALL_EXEC_TAINT = self::EXEC_TAINT | self::SQL_NUMKEY_EXEC_TAINT | self::ESCAPED_EXEC_TAINT;
+	const ALL_YES_EXEC_TAINT = self::ALL_TAINT | self::ALL_EXEC_TAINT;
+	// Taints that support backpropagation. Does not include numkey
+	// due to special array handling.
+	const BACKPROP_TAINTS = self::ALL_EXEC_TAINT & ~self::SQL_NUMKEY_EXEC_TAINT;
 	const ESCAPES_HTML = ( self::YES_TAINT & ~self::HTML_TAINT ) | self::ESCAPED_EXEC_TAINT;
 	/**
 	 * Called on every node in the AST in post-order
@@ -238,7 +242,7 @@ abstract class SecurityCheckPlugin extends PluginImplementation {
 	 *     Note: escapes_html adds the exec_escaped flag, use
 	 *     escapes_htmlnoent if the value is safe to double encode.
 	 *  * onlysafefor_{type}
-	 *     Same as above, intended for @return statements.
+	 *     Same as above, intended for "@return" statements.
 	 *     Only difference is that onlysafefor_html sets ESCAPED_TAINT instead
 	 *     of ESCAPED_EXEC_TAINT
 	 *  * none - self::NO_TAINT
