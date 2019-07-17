@@ -1,6 +1,6 @@
 <?php
 
-use Phan\Language\Context;
+use Phan\Exception\InvalidFQSENException;
 use Phan\Language\FQSEN\FullyQualifiedClassName;
 use Phan\Language\FQSEN\FullyQualifiedMethodName;
 use Phan\Language\FQSEN\FullyQualifiedFunctionName;
@@ -8,8 +8,8 @@ use Phan\Language\FQSEN\FullyQualifiedFunctionLikeName;
 use Phan\Language\FQSEN;
 use Phan\Language\Element\Method;
 use Phan\Language\Type\CallableType;
+use Phan\Language\Type\ClosureType;
 use Phan\Language\UnionType;
-use Phan\CodeBase;
 use ast\Node;
 
 /**
@@ -31,50 +31,29 @@ use ast\Node;
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
-class MWVisitor extends TaintednessBaseVisitor {
-
+class MWVisitor extends TaintednessVisitor {
 	/**
-	 * Constructor to enforce plugin is instance of MediaWikiSecurityCheckPlugin
-	 *
-	 * @param CodeBase $code_base
-	 * @param Context $context
-	 * @param MediaWikiSecurityCheckPlugin $plugin
+	 * Re-declared for better type inference
+	 * @suppress PhanReadOnlyProtectedProperty
+	 * @var MediaWikiSecurityCheckPlugin
 	 */
-	public function __construct(
-		CodeBase $code_base,
-		Context $context,
-		MediaWikiSecurityCheckPlugin $plugin
-	) {
-		parent::__construct( $code_base, $context, $plugin );
-		// Ensure phan knows plugin is right type
-		$this->plugin = $plugin;
-	}
-
-	/**
-	 * @param Node $node
-	 */
-	public function visit( Node $node ) {
-	}
-
-	/**
-	 * Check static calls for hook registration
-	 *
-	 * Forwards to method call handler.
-	 * @param Node $node
-	 */
-	public function visitStaticCall( Node $node ) {
-		$this->visitMethodCall( $node );
-	}
+	protected $plugin;
 
 	/**
 	 * Try and recognize hook registration
 	 *
 	 * Also handles static calls
 	 * @param Node $node
+	 * @return int
 	 */
-	public function visitMethodCall( Node $node ) {
+	public function visitMethodCall( Node $node ) : int {
+		$parentTaint = parent::visitMethodCall( $node );
 		try {
 			$ctx = $this->getCtxN( $node );
+			if ( !isset( $node->children['method'] ) ) {
+				// Called by visitCall
+				return $parentTaint;
+			}
 			$methodName = $node->children['method'];
 			$method = $ctx->getMethod(
 				$methodName,
@@ -104,9 +83,10 @@ class MWVisitor extends TaintednessBaseVisitor {
 				default:
 					$this->doSelectWrapperSpecialHandling( $node, $method );
 			}
-		} catch ( Exception $e ) {
+		} catch ( Exception $_ ) {
 			// ignore
 		}
+		return $parentTaint;
 	}
 
 	/**
@@ -313,6 +293,8 @@ class MWVisitor extends TaintednessBaseVisitor {
 
 	private function registerHook( string $hookType, FullyQualifiedFunctionLikeName $callback ) {
 		$alreadyRegistered = $this->plugin->registerHook( $hookType, $callback );
+		// @phan-suppress-next-next-line PhanTypeSuspiciousStringExpression Implementations of
+		// FullyQualifiedFunctionLikeName have a __toString method.
 		$this->debug( __METHOD__, "registering $callback for hook $hookType" );
 		if ( !$alreadyRegistered ) {
 			// If this is the first time seeing this, re-analyze the
@@ -337,10 +319,7 @@ class MWVisitor extends TaintednessBaseVisitor {
 			// we know what it is, in case its already been
 			// analyzed.
 			if ( $func ) {
-				$func->analyze(
-					$func->getContext(),
-					$this->code_base
-				);
+				$this->analyzeFunc( $func );
 			}
 		}
 	}
@@ -350,13 +329,15 @@ class MWVisitor extends TaintednessBaseVisitor {
 	 *
 	 * e.g. A tag hook's return value is output as html.
 	 * @param Node $node
+	 * @return int
 	 */
-	public function visitReturn( Node $node ) {
+	public function visitReturn( Node $node ) : int {
+		$parentTaint = parent::visitReturn( $node );
 		if (
 			!$this->context->isInFunctionLikeScope()
 			|| !$node->children['expr'] instanceof Node
 		) {
-			return;
+			return $parentTaint;
 		}
 		$funcFQSEN = $this->context->getFunctionLikeFQSEN();
 
@@ -380,6 +361,7 @@ class MWVisitor extends TaintednessBaseVisitor {
 			);
 			break;
 		}
+		return $parentTaint;
 	}
 
 	/**
@@ -389,7 +371,6 @@ class MWVisitor extends TaintednessBaseVisitor {
 	 * @note This will only work where the return
 	 *  statement is an array literal.
 	 * @param Node|Mixed $node Node from ast tree
-	 * @suppress PhanTypeMismatchForeach
 	 */
 	private function handleGetQueryInfoReturn( $node ) {
 		if (
@@ -662,7 +643,6 @@ class MWVisitor extends TaintednessBaseVisitor {
 	 *
 	 * @param Node $node The expr child of the return. NOT the return itself
 	 * @param FQSEN $funcName
-	 * @suppress PhanTypeMismatchForeach
 	 */
 	private function visitReturnOfFunctionHook( Node $node, FQSEN $funcName ) {
 		if (
@@ -813,7 +793,7 @@ class MWVisitor extends TaintednessBaseVisitor {
 		$var = $cnode->getVariable();
 		$types = $var->getUnionType()->getTypeSet();
 		foreach ( $types as $type ) {
-			if ( $type instanceof CallableType ) {
+			if ( $type instanceof CallableType || $type instanceof ClosureType ) {
 				return $this->getFQSENFromCallable( $node );
 			}
 			if ( $type->isNativeType() ) {
@@ -832,13 +812,15 @@ class MWVisitor extends TaintednessBaseVisitor {
 	 * Check for $wgHooks registration
 	 *
 	 * @param Node $node
+	 * @return int
 	 * @note This assumes $wgHooks is always the global
 	 *   even if there is no globals declaration.
 	 */
-	public function visitAssign( Node $node ) {
+	public function visitAssign( Node $node ) : int {
+		$parentTaint = parent::visitAssign( $node );
+
 		$var = $node->children['var'];
 		assert( $var instanceof Node );
-		$cb = null;
 		$hookName = null;
 		$cbExpr = $node->children['expr'];
 		// The $wgHooks['foo'][] case
@@ -871,14 +853,15 @@ class MWVisitor extends TaintednessBaseVisitor {
 				);
 			}
 		}
+		return $parentTaint;
 	}
 
 	/**
-	 * Try to detect HTMLForm specifiers
+	 * Special implementation of visitArray to detect HTMLForm specifiers
 	 *
 	 * @param Node $node
 	 */
-	public function visitArray( Node $node ) {
+	private function doVisitArray( Node $node ) {
 		$authReqFQSEN = FullyQualifiedClassName::fromFullyQualifiedString(
 			'MediaWiki\Auth\AuthenticationRequest'
 		);
@@ -949,13 +932,12 @@ class MWVisitor extends TaintednessBaseVisitor {
 		$isInfo = false;
 		$isOptionsSafe = true; // options key is really messed up with escaping.
 		foreach ( $node->children as $child ) {
-			assert( $child->kind === \ast\AST_ARRAY_ELEM );
-			if ( !is_string( $child->children['key'] ) ) {
-				// FIXME, instead of skipping, should we abort
-				// the whole thing if there is a numeric or null
-				// key? As its unlikely to be an htmlform in that case.
-				continue;
+			if ( $child === null || !is_string( $child->children['key'] ) ) {
+				// If we have list( , $x ) = foo() or a numeric/null key, chances
+				// are this is not an HTMLForm.
+				return;
 			}
+			assert( $child->kind === \ast\AST_ARRAY_ELEM );
 			$key = (string)$child->children['key'];
 			switch ( $key ) {
 				case 'type':
@@ -1042,10 +1024,16 @@ class MWVisitor extends TaintednessBaseVisitor {
 				return;
 			}
 
-			$fqsen = FullyQualifiedClassName::fromStringInContext(
-				$className,
-				$this->context
-			);
+			try {
+				$fqsen = FullyQualifiedClassName::fromStringInContext(
+					$className,
+					$this->context
+				);
+			} catch ( InvalidFQSENException $_ ) {
+				// 'class' refers to something which is not a class, and this is probably not
+				// an HTMLForm
+				return;
+			}
 			if ( !$this->code_base->hasClassWithFQSEN( $fqsen ) ) {
 				return;
 			}
@@ -1082,7 +1070,7 @@ class MWVisitor extends TaintednessBaseVisitor {
 				SecurityCheckPlugin::ESCAPED_EXEC_TAINT,
 				$this->getTaintedness( $label ),
 				'HTMLForm label key escapes its input' .
-					$this->getOriginalTaintLine( $label )
+				$this->getOriginalTaintLine( $label )
 			);
 		}
 		if ( $rawLabel !== null ) {
@@ -1091,7 +1079,7 @@ class MWVisitor extends TaintednessBaseVisitor {
 				SecurityCheckPlugin::HTML_EXEC_TAINT,
 				$this->getTaintedness( $rawLabel ),
 				'HTMLForm label-raw needs to escape input' .
-					$this->getOriginalTaintLine( $rawLabel )
+				$this->getOriginalTaintLine( $rawLabel )
 			);
 		}
 		if ( $isInfo === true && $raw === true ) {
@@ -1099,7 +1087,7 @@ class MWVisitor extends TaintednessBaseVisitor {
 				SecurityCheckPlugin::HTML_EXEC_TAINT,
 				$this->getTaintedness( $default ),
 				'HTMLForm info field in raw mode needs to escape default key' .
-					$this->getOriginalTaintLine( $default )
+				$this->getOriginalTaintLine( $default )
 			);
 		}
 		if ( $isInfo === true && ( $raw === false || $raw === null ) ) {
@@ -1107,7 +1095,7 @@ class MWVisitor extends TaintednessBaseVisitor {
 				SecurityCheckPlugin::ESCAPED_EXEC_TAINT,
 				$this->getTaintedness( $default ),
 				'HTMLForm info field (non-raw) escapes default key already' .
-					$this->getOriginalTaintLine( $default )
+				$this->getOriginalTaintLine( $default )
 			);
 		}
 		if ( !$isOptionsSafe && $options instanceof Node ) {
@@ -1127,8 +1115,8 @@ class MWVisitor extends TaintednessBaseVisitor {
 						SecurityCheckPlugin::HTML_EXEC_TAINT,
 						$this->getTaintedness( $key ),
 						'HTMLForm option label needs escaping' .
-							$value .
-							$this->getOriginalTaintLine( $key )
+						$value .
+						$this->getOriginalTaintLine( $key )
 					);
 				}
 			} else {
@@ -1143,23 +1131,36 @@ class MWVisitor extends TaintednessBaseVisitor {
 					'HTMLForm option label needs escaping ' .
 					'(Maybe false positive as could not determine ' .
 					'if it was key or value that is unescaped)' .
-						$this->getOriginalTaintLine( $options )
+					$this->getOriginalTaintLine( $options )
 				);
 			}
 		}
+	}
+	/**
+	 * Try to detect HTMLForm specifiers
+	 *
+	 * @param Node $node
+	 * @return int
+	 */
+	public function visitArray( Node $node ) : int {
+		$parentTaint = parent::visitArray( $node );
+		$this->doVisitArray( $node );
+		return $parentTaint;
 	}
 
 	/**
 	 * A global declaration. Use to adjust types for MW globals
 	 *
 	 * @param Node $node
+	 * @return int
 	 */
-	public function visitGlobal( Node $node ) {
+	public function visitGlobal( Node $node ) : int {
+		$parentTaint = parent::visitGlobal( $node );
 		assert( isset( $node->children['var'] ) && $node->children['var']->kind === \ast\AST_VAR );
 		$varName = $node->children['var']->children['name'];
 		if ( !is_string( $varName ) ) {
 			// global $$foo;
-			return;
+			return $parentTaint;
 		}
 		$scope = $this->context->getScope();
 		if ( $scope->hasVariableWithName( $varName ) ) {
@@ -1194,5 +1195,7 @@ class MWVisitor extends TaintednessBaseVisitor {
 		} else {
 			$this->debug( __METHOD__, "global $varName not in scope (?)" );
 		}
+
+		return $parentTaint;
 	}
 }

@@ -11,8 +11,6 @@ tmpFile=`mktemp testtmp.XXXXXXXX`
 trap "rm $tmpFile" exit
 totalTests=0
 failedTests=0
-php=`which php7.0`
-php=${php:-`which php`}
 if [ "$1" = '-v' ]
 	then SECCHECK_DEBUG=/dev/stderr
 		shift
@@ -27,11 +25,11 @@ do
 	SECURITY_CHECK_EXT_PATH=`pwd`"/integration/$i/"
 	export SECURITY_CHECK_EXT_PATH
 	totalTests=$((totalTests+1))
-	$php ../vendor/phan/phan/phan \
+	php ../vendor/phan/phan/phan \
         	--project-root-directory "." \
         	--config-file "integration-test-config.php" \
         	--output "php://stdout" \
-		-l "integration/$i" | tee "$SECCHECK_DEBUG" | grep ' SecurityCheck\|PhanSyntaxError\|ParseError:\|Stack trace:\|phan_error_handler()\|^#[0-9][0-9]* \|ast\\'  > $tmpFile
+		-l "integration/$i" | tee "$SECCHECK_DEBUG"   > $tmpFile
 	diff -u "integration/$i/expectedResults.txt" "$tmpFile"
 	if [ $? -gt 0 ]
 		then failedTests=$((failedTests+1))
